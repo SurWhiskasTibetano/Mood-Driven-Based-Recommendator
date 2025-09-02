@@ -1,0 +1,1265 @@
+# pruebas.py — Recomendador Emocional con dirección (calle y número), Nearby y rutas Google Maps
+# Modo: SOLO ubicación manual
+# Requisitos: streamlit, googlemaps, requests, python-dotenv, pandas, numpy
+
+import os
+import time
+import json
+import math
+import re
+import unicodedata
+import random
+import requests
+import numpy as np
+import pandas as pd
+import googlemaps
+import streamlit as st
+from dotenv import load_dotenv
+from urllib.parse import quote_plus
+from datetime import datetime
+
+# --------- Config de página (primera llamada a st.*) ---------
+st.set_page_config(page_title="Recomendador Emocional", layout="wide")
+
+# --------- Claves desde .env ---------
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+
+if not GOOGLE_MAPS_API_KEY:
+    st.error("Falta GOOGLE_MAPS_API_KEY en .env")
+    st.stop()
+
+gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+
+# --------- Constantes de UI ---------
+LIST_CONTAINER_HEIGHT_PX = 720  # altura del contenedor scrollable
+
+# --------- Pesos del score ---------
+W_RATING = 0.5
+W_REVIEWS = 0.3
+W_PROX = 0.2
+
+# =====================================================================
+# ======================  CEREBRO PRINCIPAL (IA)  =====================
+# =====================================================================
+
+def _norm(t: str) -> str:
+    t = (t or "").lower()
+    t = unicodedata.normalize("NFD", t)
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
+
+# Curado amplio por emoción (guía + fallback)
+CURATED_BY_CATEGORY = {
+    "tristeza": [
+        "parque luminoso", "jardín botánico", "mirador tranquilo", "paseo junto al agua",
+        "cafetería acogedora", "librería", "museo", "centro cultural", "tetería",
+        "paseo urbano", "exposición de arte", "cine", "terraza tranquila",
+        "paseo fluvial", "sendero fácil", "espacio verde amplio", "museo de historia",
+        "museo de arte", "galería", "música suave"
+    ],
+    "ansiedad/estrés": [
+        "parque", "jardín botánico", "spa", "tetería", "yoga", "paseo fluvial", "mirador",
+        "cafetería tranquila", "baños árabes", "paseo por la playa", "bosque urbano", "biblioteca",
+        "meditación", "camino perimetral", "sendero fácil", "pistas de caminar", "masaje",
+        "paseo por el río", "templo", "jardín zen"
+    ],
+    "ira": [
+        "gimnasio", "boxeo", "rocódromo", "piscina", "running", "crossfit",
+        "pista de pádel", "circuito de bici", "pista de atletismo",
+        "parque de trampolines", "kickboxing", "calistenia", "boulder",
+        "sauna tras ejercicio", "baño frío", "spinning", "clase de baile enérgica"
+    ],
+    "cansancio": [
+        "cafetería", "tetería", "librería", "cine", "heladería", "terraza con sombra", "spa",
+        "museo pequeño", "paseo corto", "sala de lectura", "galería", "chill-out",
+        "parque de barrio", "brunch tranquilo", "mirador con bancos", "sala de té",
+        "cafetería con sofás", "biblioteca"
+    ],
+    "soledad": [
+        "cafetería mesas compartidas", "coworking", "taller", "voluntariado", "biblioteca",
+        "centro cultural", "clase grupal", "club de lectura", "juegos de mesa", "intercambio de idiomas",
+        "bar de vermut tranquilo", "mesas largas", "colectivo creativo", "huerto urbano",
+        "mercadillo", "asociación", "meetup", "coro"
+    ],
+    "aburrimiento": [
+        "escape room", "arcade", "bolera", "taller creativo", "museo interactivo", "mercadillo",
+        "minigolf", "salón de juegos", "karaoke", "paintball", "laser tag",
+        "feria", "parque temático pequeño", "cerámica", "clase de cocina",
+        "búsqueda del tesoro", "gincana", "patinaje", "realidad virtual"
+    ],
+    "felicidad": [
+        "discoteca", "bar de cócteles", "karaoke", "rooftop", "conciertos", "tapas",
+        "terraza con vistas", "club de comedia", "sala de conciertos", "mercado gastronómico",
+        "bar musical", "baile social", "fiesta latina", "festival", "speakeasy",
+        "brunch animado", "taberna moderna", "food market"
+    ],
+    "amor/romance": [
+        "mirador", "parque", "terraza romántica", "restaurante íntimo", "paseo atardecer",
+        "jardín botánico", "bar de vinos", "bistró", "azotea tranquila", "casco antiguo",
+        "paseo fluvial", "velas", "café con encanto", "degustación de vinos",
+        "jardines", "museo pequeño", "rincón fotográfico", "patio"
+    ],
+    "curiosidad": [
+        "museo", "galería", "centro cultural", "taller", "librería", "museo de ciencias",
+        "exposición temporal", "archivo histórico", "ruta guiada", "museo interactivo", "visita a estudio",
+        "itinerario urbano", "centro de innovación", "artesanía", "ruta de murales",
+        "visita teatralizada", "planetario", "observatorio", "aula de naturaleza"
+    ],
+    "calma/paz": [
+        "spa", "jardín botánico", "paseo junto al agua", "tetería", "templo",
+        "biblioteca", "parque amplio", "baños árabes", "paseo por lago", "sendero fácil",
+        "mirador al amanecer", "paseo marítimo", "parque con estanque", "ribera del río",
+        "meditación", "yoga suave", "reserva natural", "ermita"
+    ],
+    "neutro": [
+        "parque", "cafetería", "museo", "mirador", "librería", "paseo urbano", "galería",
+        "mercadillo", "centro cultural", "paseo junto al agua"
+    ],
+}
+
+# Palabras clave viables para Google Nearby (canon)
+# y sinónimos → canon
+CANON_KEYWORDS = [
+    # Naturaleza / paseo
+    "parque", "jardín botánico", "mirador", "paseo fluvial", "paseo marítimo", "reserva natural",
+    "playa", "sendero", "ribera del río",
+    # Cafés y relax
+    "cafetería", "tetería", "heladería", "chill-out",
+    # Cultura
+    "museo", "galería de arte", "centro cultural", "biblioteca", "archivo histórico",
+    "museo de ciencias", "planetario", "observatorio",
+    # Bienestar
+    "spa", "baños árabes", "masaje", "yoga", "meditación", "sauna",
+    # Deporte / descarga
+    "gimnasio", "boxeo", "rocódromo", "piscina", "pista de pádel", "crossfit",
+    "pista de atletismo", "parque de trampolines", "escalada",
+    # Ocio
+    "escape room", "bolera", "arcade", "karaoke", "minigolf", "laser tag", "paintball", "realidad virtual",
+    # Social / comunidad
+    "coworking", "club de lectura", "intercambio de idiomas", "asociación",
+    # Noche / celebración
+    "discoteca", "bar de cócteles", "rooftop", "sala de conciertos", "club de comedia",
+    "bar de vinos", "vinoteca", "bistró", "mercado gastronómico",
+    # Restauración romántica
+    "restaurante romántico", "café con encanto",
+]
+
+SYNONYMS_TO_CANON = {
+    # Naturaleza / paseo
+    r"\bparque luminoso\b": "parque",
+    r"\bparque de barrio\b": "parque",
+    r"\bpaseo junto al agua\b": "paseo fluvial",
+    r"\bpaseo por el río\b": "paseo fluvial",
+    r"\bpaseo por la playa\b": "paseo marítimo",
+    r"\bribera\b": "ribera del río",
+    r"\bsendero fácil\b": "sendero",
+    r"\bruta corta\b": "sendero",
+    r"\bbosque urbano\b": "parque",
+    r"\bespacio verde\b": "parque",
+    r"\bmirador tranquilo\b": "mirador",
+    r"\bmirador con bancos\b": "mirador",
+    # Cafés / relax
+    r"\bcafeter[ií]a acogedora\b": "cafetería",
+    r"\bcafeter[ií]a tranquila\b": "cafetería",
+    r"\bcafeter[ií]a con sof[aá]s\b": "cafetería",
+    r"\bsala de t[eé]\b": "tetería",
+    r"\bchill[- ]?out\b": "chill-out",
+    # Cultura
+    r"\bexposici[oó]n de arte\b": "galería de arte",
+    r"\bgaler[ií]a\b": "galería de arte",
+    r"\bmuseo de arte\b": "museo",
+    r"\bmuseo peque[nñ]o\b": "museo",
+    r"\bmuseo interactivo\b": "museo",
+    r"\bcentro de innovaci[oó]n\b": "centro cultural",
+    r"\bruta guiada\b": "centro cultural",
+    r"\bitinerario urbano\b": "centro cultural",
+    # Bienestar
+    r"\bba[nñ]os (arabes|a[rá]bes)\b": "baños árabes",
+    r"\btemplo|silencio\b": "templo",
+    # Deporte / descarga
+    r"\brunning\b": "pista de atletismo",
+    r"\bboulder\b": "rocódromo",
+    r"\bclase de baile en[ée]rgica\b": "gimnasio",
+    r"\bcalistenia\b": "gimnasio",
+    # Ocio
+    r"\bsal[oó]n de juegos\b": "arcade",
+    r"\bparque tem[aá]tico peque[nñ]o\b": "mini golf",
+    r"\bgim?c?ana|gincana\b": "escape room",
+    r"\bb[uú]squeda del tesoro\b": "escape room",
+    r"\bferia\b": "mercado gastronómico",
+    r"\bclase de cocina\b": "centro cultural",
+    r"\btaller creativo|cer[aá]mica\b": "centro cultural",
+    # Social / comunidad
+    r"\bmesas compartidas\b": "cafetería",
+    r"\bcolectivo creativo\b": "centro cultural",
+    r"\bvoluntariado\b": "asociación",
+    r"\bmeetup\b": "centro cultural",
+    r"\bhuerto urbano\b": "asociación",
+    # Noche / romance
+    r"\brooftop\b": "rooftop",
+    r"\bazotea\b": "rooftop",
+    r"\bbar de vermut\b": "bar de cócteles",
+    r"\bbar con velas\b": "bar de vinos",
+    r"\bdegustaci[oó]n de vinos\b": "vinoteca",
+    r"\bcaf[eé] con encanto\b": "café con encanto",
+}
+
+def _map_term_to_canon(term: str, category_hint: str = "neutro") -> str:
+    """Mapea un término a una keyword canónica Nearby-friendly."""
+    t = _norm(term)
+    # 1) Sinónimos por regex
+    for pat, canon in SYNONYMS_TO_CANON.items():
+        if re.search(pat, t):
+            return canon
+    # 2) Coincidencia directa con canon
+    for canon in CANON_KEYWORDS:
+        if _norm(canon) in t or t in _norm(canon):
+            return canon
+    # 3) Heurística: recorta adjetivos comunes
+    t_simple = re.sub(r"\b(tranquil[ao]s?|acogedor[ao]s?|rom[aá]ntic[ao]s?|peque[ñn]o[s]?)\b", "", t).strip()
+    for canon in CANON_KEYWORDS:
+        if _norm(canon) == t_simple:
+            return canon
+    # 4) Fallback: elige uno coherente con la emoción
+    pool = CANON_BY_EMOTION.get(category_hint, CANON_BY_EMOTION["neutro"])
+    return random.choice(pool)
+
+# Canon por emoción para completar variedad
+CANON_BY_EMOTION = {
+    "tristeza": [
+        "parque", "jardín botánico", "mirador", "paseo fluvial", "cafetería",
+        "librería", "museo", "tetería", "centro cultural", "biblioteca"
+    ],
+    "ansiedad/estrés": [
+        "parque", "jardín botánico", "paseo fluvial", "paseo marítimo", "spa",
+        "tetería", "meditación", "yoga", "baños árabes", "biblioteca"
+    ],
+    "ira": [
+        "gimnasio", "boxeo", "rocódromo", "piscina", "pista de pádel",
+        "crossfit", "pista de atletismo", "parque de trampolines", "sauna"
+    ],
+    "cansancio": [
+        "cafetería", "tetería", "librería", "cine", "spa", "museo",
+        "galería de arte", "parque", "chill-out", "biblioteca"
+    ],
+    "soledad": [
+        "cafetería", "coworking", "club de lectura", "intercambio de idiomas",
+        "centro cultural", "biblioteca", "asociación", "cafetería"
+    ],
+    "aburrimiento": [
+        "escape room", "arcade", "bolera", "karaoke", "minigolf",
+        "laser tag", "paintball", "realidad virtual"
+    ],
+    "felicidad": [
+        "discoteca", "bar de cócteles", "rooftop", "sala de conciertos",
+        "club de comedia", "mercado gastronómico", "bar de vinos"
+    ],
+    "amor/romance": [
+        "mirador", "parque", "bar de vinos", "vinoteca", "bistró",
+        "restaurante romántico", "café con encanto", "rooftop", "paseo fluvial"
+    ],
+    "curiosidad": [
+        "museo", "galería de arte", "centro cultural", "museo de ciencias",
+        "planetario", "observatorio", "biblioteca"
+    ],
+    "calma/paz": [
+        "spa", "jardín botánico", "paseo fluvial", "paseo marítimo",
+        "templo", "meditación", "yoga", "biblioteca", "parque"
+    ],
+    "neutro": [
+        "parque", "cafetería", "museo", "mirador", "galería de arte",
+        "centro cultural", "paseo fluvial"
+    ],
+}
+
+def detect_mood_category(mood_text: str) -> str:
+    """Heurística robusta (fallback) con regex y límites de palabra."""
+    p = _norm(mood_text)
+    rules = [
+        ("tristeza", [
+            r"\bmuy mal\b", r"\bmal\b", r"\bfatal\b", r"\bhorrible\b", r"\bbajon\b", r"\bme siento mal\b",
+            r"\bdepre", r"\bdeprim", r"\bmelanc", r"\bdesanim", r"\bllor", r"\bvac[ií]o\b"
+        ]),
+        ("ansiedad/estrés", [r"\bansied", r"\bnervios\b", r"\bagobio\b", r"\bestres\b", r"\bangust", r"\bpreocup"]),
+        ("ira", [r"\bira\b", r"\benfad", r"\brabia\b", r"\bfuria\b", r"\bcabre", r"\benoj"]),
+        ("cansancio", [r"\bcansancio\b", r"\bcansad", r"\bagotad", r"\bfatiga\b", r"\bburnout\b", r"\bsin fuerzas\b"]),
+        ("soledad", [r"\bsoledad\b", r"\bsolo\b", r"\bsola\b", r"\baislad", r"\baislam"]),
+        ("aburrimiento", [r"\baburr", r"\bapat", r"\bsin ganas\b", r"\bapatico\b", r"\bapatica\b"]),
+        ("felicidad", [r"\bfeliz\b", r"\bcontent", r"\balegr", r"\beufor", r"\bgenial\b", r"\bde lujo\b"]),
+        ("amor/romance", [r"\bamor\b", r"\benamora", r"\bromant", r"\bcariñ", r"\brom[aá]nt"]),
+        ("curiosidad", [r"\bcurios", r"\bcreativ", r"\binspir", r"\bexplor", r"\bdescubr"]),
+        ("calma/paz", [r"\bcalma\b", r"\bpaz\b", r"\btranquil", r"\bseren", r"\brelajad"]),
+    ]
+    for category, pats in rules:
+        if any(re.search(pat, p) for pat in pats):
+            return category
+    return "neutro"
+
+TONE_HINTS = {
+    "tristeza":        ("cálido y suave",            "😔"),
+    "ansiedad/estrés": ("calmante y tranquilizador", "😥"),
+    "ira":             ("validante y sereno",         "💢"),
+    "cansancio":       ("reconfortante",              "😮‍💨"),
+    "soledad":         ("acogedor",                   "🤍"),
+    "aburrimiento":    ("ligero y motivador",         "🙂"),
+    "felicidad":       ("alegre y entusiasta",        "🎉"),
+    "amor/romance":    ("tierno y cómplice",          "💞"),
+    "curiosidad":      ("inspirador",                 "🌱"),
+    "calma/paz":       ("sereno",                     "🧘"),
+    "neutro":          ("cálido y cercano",           "🙂"),
+}
+
+def _fallback_empathy(mood_text: str) -> str:
+    category = detect_mood_category(mood_text)
+    _, emoji = TONE_HINTS.get(category, TONE_HINTS["neutro"])
+    templates = {
+        "tristeza":        f"Siento mucho que estés pasando por esto {emoji}. Voy a recomendarte algunos lugares suaves para ayudarte un poco.",
+        "ansiedad/estrés": f"Suena intenso; vamos a bajar revoluciones {emoji}. Te recomendaré sitios tranquilos para desconectar un poco.",
+        "ira":             f"Tiene sentido que te sientas así {emoji}. Te propondré opciones para liberar tensión de forma sana.",
+        "cansancio":       f"Se nota el cansancio {emoji}. Te sugeriré lugares para recargar pilas con calma.",
+        "soledad":         f"Aquí estoy contigo {emoji}. Te propondré sitios donde puedas sentirte acompañado/a a tu ritmo.",
+        "aburrimiento":    f"A veces apetece algo distinto {emoji}. Te recomendaré planes con un poco de chispa.",
+        "felicidad":       f"¡Qué alegría leerte! {emoji} Te propondré lugares para celebrarlo a tu manera.",
+        "amor/romance":    f"Qué bonito momento {emoji}. Te sugeriré rincones con buena atmósfera para un plan especial.",
+        "curiosidad":      f"Esa curiosidad es oro {emoji}. Te propondré lugares que inviten a explorar.",
+        "calma/paz":       f"Qué bien sentir esa paz {emoji}. Te sugeriré sitios para seguir cuidando ese bienestar.",
+        "neutro":          f"Estoy aquí contigo 🙂. Te recomendaré algunos lugares pensados para ti.",
+    }
+    return templates.get(category, templates["neutro"])
+
+# Prompt único (Gemini devuelve JSON)
+PROMPT_BRAIN_JSON = """
+Eres un asistente en español (España). Analiza el estado del usuario y devuelve SOLO un JSON con esta forma:
+
+{
+  "category": "tristeza|ansiedad/estrés|ira|cansancio|soledad|aburrimiento|felicidad|amor/romance|curiosidad|calma/paz",
+  "empathy": "1-2 frases, tono acorde a la emoción, EXACTAMENTE 1 emoji, NO empieces con 'Gracias por compartir'",
+  "place_types": ["3 a 6 tipos de lugares en España, minúsculas, 1-3 palabras, sin nombres propios"]
+}
+
+Criterios:
+- Varía los tipos de lugares; evita repetir siempre los mismos.
+- Ajusta interior/exterior y social/individual según la emoción.
+- Deben ser lugares factibles para buscar en Google Maps Nearby en España.
+- Ejemplos (no los devuelvas tal cual): parque, jardín botánico, mirador, paseo fluvial, cafetería, tetería, heladería, librería,
+  museo, galería de arte, centro cultural, biblioteca, spa, baños árabes, masaje, yoga, meditación, gimnasio, boxeo, rocódromo,
+  piscina, pista de pádel, crossfit, pista de atletismo, parque de trampolines, escape room, bolera, arcade, karaoke, minigolf,
+  laser tag, paintball, realidad virtual, coworking, club de lectura, intercambio de idiomas, discoteca, bar de cócteles,
+  rooftop, sala de conciertos, club de comedia, bar de vinos, vinoteca, bistró, mercado gastronómico, restaurante romántico,
+  café con encanto, planetario, observatorio, reserva natural, templo.
+- Si paso “Evita”, no uses esos tipos ni sinónimos.
+
+Estado del usuario: «{mood}»
+Evita (si hay): {avoid}
+""".strip()
+
+def gemini_brain(mood_text: str, avoid_terms: list[str] | None = None) -> tuple[str, list[str], str]:
+    """Devuelve (empathy_message, place_types, category) usando Gemini (JSON estricto)."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    avoid = ", ".join(sorted(set((avoid_terms or [])[:12])))
+    prompt = PROMPT_BRAIN_JSON.format(mood=mood_text, avoid=avoid if avoid else "—")
+
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.9,  # variedad
+            "topP": 0.95,
+            "maxOutputTokens": 350,
+            "responseMimeType": "application/json"
+        }
+    }
+    params = {"key": GEMINI_API_KEY}
+    resp = requests.post(url, headers=headers, params=params, data=json.dumps(payload), timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+
+    raw = data["candidates"][0]["content"]["parts"][0]["text"]
+    obj = json.loads(raw)
+
+    empathy = str(obj.get("empathy", "")).strip()
+    places = [str(x).strip().lower() for x in obj.get("place_types", []) if str(x).strip()]
+    category = str(obj.get("category", "")).strip().lower()
+
+    if not empathy or not places:
+        raise ValueError("JSON incompleto")
+
+    # Filtra evitados y de-dup
+    avoid_set = {a.lower() for a in (avoid_terms or [])}
+    places = [p for p in places if p not in avoid_set]
+    places = list(dict.fromkeys(places))[:6]
+    return empathy, places, category
+
+def normalize_to_nearby_keywords(recommended: list[str], category: str, avoid: list[str]) -> list[str]:
+    """Normaliza los tipos devueltos por Gemini a keywords viables para Nearby."""
+    avoid_set = {a.lower() for a in avoid}
+    out = []
+    for t in recommended:
+        canon = _map_term_to_canon(t, category_hint=category or "neutro")
+        if canon.lower() not in avoid_set and canon not in out:
+            out.append(canon)
+        if len(out) >= 6:
+            break
+    # Completa si faltan con canon por emoción sin repetir
+    if len(out) < 3:
+        pool = [x for x in CANON_BY_EMOTION.get(category or "neutro", CANON_BY_EMOTION["neutro"]) if x not in out and x not in avoid_set]
+        random.shuffle(pool)
+        out.extend(pool[: (6 - len(out))])
+    return out
+
+def mock_from_mood(mood_text: str, avoid: list[str] | None = None):
+    """Fallback clásico: muestrea del curado y normaliza a keywords Nearby."""
+    category = detect_mood_category(mood_text)
+    avoid = avoid or []
+    candidates = CURATED_BY_CATEGORY.get(category, CURATED_BY_CATEGORY["neutro"])[:]
+    random.shuffle(candidates)
+    raw = []
+    for c in candidates:
+        if len(raw) >= 6:
+            break
+        raw.append(c)
+    return normalize_to_nearby_keywords(raw, category, avoid)
+
+# =====================================================================
+# ======================  UTILIDADES DE MAPS  ==========================
+# =====================================================================
+
+def _maps_link(lat, lon):
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+def gm_embed_directions_url(
+    origin_text: str,
+    dest_place_id: str | None = None,
+    dest_text: str | None = None,
+    mode: str = "driving",
+    waypoints_latlon: list[tuple[float, float]] | None = None,
+):
+    base = "https://www.google.com/maps/embed/v1/directions"
+    if not origin_text:
+        raise ValueError("origin_text es obligatorio")
+    if not (dest_place_id or dest_text):
+        raise ValueError("Debes pasar dest_place_id o dest_text")
+    params = [
+        f"key={GOOGLE_MAPS_API_KEY}",
+        f"origin={quote_plus(origin_text)}",
+        f"mode={mode}",
+    ]
+    if dest_place_id:
+        params.append(f"destination=place_id:{dest_place_id}")
+    else:
+        params.append(f"destination={quote_plus(dest_text)}")
+    if waypoints_latlon:
+        wp_str = "|".join([f"{lat:.6f},{lon:.6f}" for (lat, lon) in waypoints_latlon])
+        params.append(f"waypoints={quote_plus(wp_str)}")
+    return f"{base}?{'&'.join(params)}"
+
+def maps_directions_link(
+    origin_text: str,
+    dest_place_id: str | None = None,
+    dest_text: str | None = None,
+    mode: str = "driving",
+    waypoints_latlon: list[tuple[float, float]] | None = None,
+    optimize_waypoints: bool = False,
+):
+    base = "https://www.google.com/maps/dir/?api=1"
+    if not origin_text:
+        raise ValueError("origin_text es obligatorio")
+    if not (dest_place_id or dest_text):
+        raise ValueError("Debes pasar dest_place_id o dest_text")
+    origin_param = f"origin={quote_plus(origin_text)}"
+    dest_param = f"destination=place_id:{dest_place_id}" if dest_place_id else f"destination={quote_plus(dest_text)}"
+    params = [origin_param, dest_param, f"travelmode={mode}"]
+    if waypoints_latlon:
+        wp_prefix = "optimize:true|" if optimize_waypoints else ""
+        wp_body = "|".join([f"{lat:.6f},{lon:.6f}" for (lat, lon) in waypoints_latlon])
+        params.append(f"waypoints={quote_plus(wp_prefix + wp_body)}")
+    return f"{base}&{'&'.join(params)}"
+
+def gm_embed_place_url(place_id=None, latlon=None):
+    base = "https://www.google.com/maps/embed/v1/place"
+    if place_id:
+        return f"{base}?key={GOOGLE_MAPS_API_KEY}&q=place_id:{place_id}"
+    if latlon:
+        return f"{base}?key={GOOGLE_MAPS_API_KEY}&q={latlon[0]:.6f},{latlon[1]:.6f}"
+    raise ValueError("Debes pasar place_id o latlon.")
+
+# --------- Detalles y fotos de Places ---------
+@st.cache_data(ttl=600, show_spinner=False)
+def get_place_details(place_id: str, language: str = "es") -> dict:
+    try:
+        fields = [
+            "name", "rating", "user_ratings_total", "url", "googleMapsUri",
+            "reviews", "photos", "editorial_summary"
+        ]
+        try:
+            resp = gmaps.place(
+                place_id=place_id,
+                fields=fields,
+                language=language,
+                reviews_sort="newest",
+                reviews_no_translations=False
+            )
+        except TypeError:
+            resp = gmaps.place(place_id=place_id, fields=fields, language=language)
+        result = resp.get("result", {}) if resp else {}
+        if "url" not in result and "googleMapsUri" in result:
+            result["url"] = result.get("googleMapsUri")
+        return result
+    except Exception:
+        return {}
+
+def place_photo_url(photo_reference: str, maxwidth: int = 640) -> str:
+    base = "https://maps.googleapis.com/maps/api/place/photo"
+    return f"{base}?maxwidth={maxwidth}&photoreference={quote_plus(photo_reference)}&key={GOOGLE_MAPS_API_KEY}"
+
+# =====================================================================
+# ======================  GEOCODING / SCORE / NEARBY  =================
+# =====================================================================
+
+def geocode_address(address: str, language: str = "es", region: str = "es"):
+    res = gmaps.geocode(address, language=language, region=region)
+    if not res:
+        raise ValueError("No se pudo geocodificar la dirección.")
+    loc = res[0]["geometry"]["location"]
+    return (loc["lat"], loc["lng"]), res[0]["formatted_address"]
+
+def reverse_geocode(latlon: tuple[float, float], language: str = "es"):
+    try:
+        res = gmaps.reverse_geocode(latlon, language=language)
+        if res:
+            return res[0]["formatted_address"]
+    except Exception:
+        pass
+    return f"{latlon[0]:.6f},{latlon[1]:.6f}"
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+def compute_scores(df: pd.DataFrame, center_latlon: tuple[float, float], radius_m: int,
+                   w_rating: float = W_RATING, w_reviews: float = W_REVIEWS, w_prox: float = W_PROX) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    df["rating"] = pd.to_numeric(df.get("rating", np.nan), errors="coerce")
+    df["user_ratings_total"] = pd.to_numeric(df.get("user_ratings_total", 0), errors="coerce").fillna(0)
+
+    c_lat, c_lon = center_latlon
+    def _dist(row):
+        lat, lon = row.get("lat"), row.get("lon")
+        if pd.notna(lat) and pd.notna(lon):
+            return haversine_m(c_lat, c_lon, float(lat), float(lon))
+        return np.nan
+    df["distance_m"] = df.apply(_dist, axis=1)
+
+    df["rating_score"] = (df["rating"].fillna(0) / 5.0).clip(0, 1)
+    max_reviews = max(1.0, float(df["user_ratings_total"].max()))
+    df["reviews_score"] = (np.log1p(df["user_ratings_total"]) / np.log1p(max_reviews)).clip(0, 1)
+    prox = 1.0 - (df["distance_m"] / float(radius_m))
+    df["proximity_score"] = prox.clip(lower=0, upper=1).fillna(0)
+    s = (w_rating * df["rating_score"] + w_reviews * df["reviews_score"] + w_prox * df["proximity_score"])
+    denom = max(1e-9, (w_rating + w_reviews + w_prox))
+    df["score"] = (s / denom).clip(0, 1)
+    return df
+
+@st.cache_data(ttl=300)
+def places_nearby_all(location, keyword, radius=1500, open_now=True, language="es"):
+    all_results = []
+    page = gmaps.places_nearby(
+        location=location,
+        keyword=keyword,
+        radius=radius,
+        open_now=open_now,
+        language=language
+    )
+    all_results.extend(page.get("results", []))
+    token = page.get("next_page_token")
+    while token:
+        time.sleep(2)
+        page = gmaps.places_nearby(page_token=token, language=language)
+        all_results.extend(page.get("results", []))
+        token = page.get("next_page_token")
+    return all_results
+
+def filter_by_rating_df(df: pd.DataFrame, min_rating=0.0) -> pd.DataFrame:
+    if "rating" not in df.columns:
+        df["rating"] = None
+    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    return df[df["rating"] >= float(min_rating)]
+
+# =====================================================================
+# ======================  RUTAS Y DESVÍOS  ============================
+# =====================================================================
+
+def _latlon_str(latlon):
+    return f"{latlon[0]},{latlon[1]}"
+
+@st.cache_data(ttl=180, show_spinner=False)
+def route_total_seconds(origin_text: str, waypoints: tuple, dest_latlon: tuple, mode: str) -> float | None:
+    try:
+        r = gmaps.directions(
+            origin_text,
+            _latlon_str(dest_latlon),
+            mode=mode,
+            waypoints=list(waypoints) if waypoints else None,
+            optimize_waypoints=False,
+            departure_time=datetime.now()
+        )
+        if not r:
+            return None
+        secs = sum(leg["duration"]["value"] for leg in r[0]["legs"])
+        return float(secs)
+    except Exception:
+        return None
+
+@st.cache_data(ttl=180, show_spinner=False)
+def optimize_route_order(origin_text: str, stops_latlon: list[tuple[float, float]], mode: str):
+    if not stops_latlon:
+        return [], [], None, None
+    if len(stops_latlon) == 1:
+        dest = stops_latlon[0]
+        secs = route_total_seconds(origin_text, tuple(), dest, mode)
+        return [], [], dest, secs
+
+    dest = stops_latlon[-1]
+    waypoints = stops_latlon[:-1]
+    try:
+        r = gmaps.directions(
+            origin_text,
+            _latlon_str(dest),
+            mode=mode,
+            waypoints=[_latlon_str(wp) for wp in waypoints],
+            optimize_waypoints=True,
+            departure_time=datetime.now()
+        )
+        if not r:
+            return list(range(len(waypoints))), waypoints, dest, None
+        order = r[0].get("waypoint_order", list(range(len(waypoints))))
+        ordered_wp = [waypoints[i] for i in order]
+        secs = sum(leg["duration"]["value"] for leg in r[0]["legs"])
+        return order, ordered_wp, dest, float(secs)
+    except Exception:
+        secs = route_total_seconds(origin_text, tuple(_latlon_str(w) for w in waypoints), dest, mode)
+        return list(range(len(waypoints))), waypoints, dest, secs
+
+def label_from_ratio(ratio: float | None) -> str:
+    if ratio is None or np.isnan(ratio):
+        return ""
+    if ratio <= 0.10:   return "genial"
+    if ratio <= 0.25:   return "muy bien"
+    if ratio <= 0.50:   return "normal"
+    if ratio <= 1.00:   return "mal"
+    return "muy mal"
+
+def compute_multi_stop_detours(origin_text: str, selected_coords: list[tuple[float,float]], candidates_df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    if candidates_df.empty or len(selected_coords) == 0:
+        candidates_df["detour_ratio"] = np.nan
+        candidates_df["ruta"] = ""
+        return candidates_df
+
+    dest = selected_coords[-1]
+    base_waypoints = tuple(_latlon_str(p) for p in selected_coords[:-1])
+    base_secs = route_total_seconds(origin_text, base_waypoints, dest, mode)
+    if not base_secs or base_secs <= 0:
+        candidates_df["detour_ratio"] = np.nan
+        candidates_df["ruta"] = ""
+        return candidates_df
+
+    many_paradas = len(selected_coords) > 6
+    max_insert_positions = 1 if many_paradas else (len(selected_coords))
+
+    ratios = []
+    for _, row in candidates_df.iterrows():
+        lat, lon = row.get("lat"), row.get("lon")
+        if pd.isna(lat) or pd.isna(lon):
+            ratios.append(np.nan)
+            continue
+        cand = (float(lat), float(lon))
+        best_secs = None
+
+        if max_insert_positions == 1:
+            new_wp = list(base_waypoints) + [_latlon_str(cand)]
+            secs = route_total_seconds(origin_text, tuple(new_wp), dest, mode)
+            best_secs = secs
+        else:
+            for i in range(max_insert_positions + 1):
+                new_wp = list(base_waypoints)
+                new_wp.insert(i, _latlon_str(cand))
+                secs = route_total_seconds(origin_text, tuple(new_wp), dest, mode)
+                if secs:
+                    best_secs = secs if (best_secs is None or secs < best_secs) else best_secs
+
+        if best_secs and best_secs > 0:
+            ratios.append(max(0.0, (best_secs - base_secs) / base_secs))
+        else:
+            ratios.append(np.nan)
+
+    candidates_df = candidates_df.copy()
+    candidates_df["detour_ratio"] = ratios
+    candidates_df["ruta"] = candidates_df["detour_ratio"].apply(label_from_ratio)
+    return candidates_df
+
+# =====================================================================
+# ======================  ESTADO INICIAL  =============================
+# =====================================================================
+
+if "suggested_terms" not in st.session_state:
+    st.session_state.suggested_terms = []
+if "raw_results_df" not in st.session_state:
+    st.session_state.raw_results_df = pd.DataFrame()
+if "results_df" not in st.session_state:
+    st.session_state.results_df = pd.DataFrame()
+if "selected_df" not in st.session_state:
+    st.session_state.selected_df = pd.DataFrame()
+if "center_latlon" not in st.session_state:
+    st.session_state.center_latlon = (40.4168, -3.7038)  # Madrid por defecto
+if "center_address" not in st.session_state:
+    st.session_state.center_address = reverse_geocode(st.session_state.center_latlon)
+if "editor_nonce" not in st.session_state:
+    st.session_state.editor_nonce = 0
+if "pending_resort" not in st.session_state:
+    st.session_state.pending_resort = False
+if "last_search_sig" not in st.session_state:
+    st.session_state.last_search_sig = None
+if "route_mode" not in st.session_state:
+    st.session_state.route_mode = "driving"
+if "intelligent_mode" not in st.session_state:
+    st.session_state.intelligent_mode = False
+if "optimize_waypoints" not in st.session_state:
+    st.session_state.optimize_waypoints = True
+if "prev_intelligent_mode" not in st.session_state:
+    st.session_state.prev_intelligent_mode = st.session_state.intelligent_mode
+if "empathy_message" not in st.session_state:
+    st.session_state.empathy_message = ""
+if "recent_terms" not in st.session_state:
+    st.session_state.recent_terms = []  # para evitar repetir siempre lo mismo
+
+# =====================================================================
+# ======================  INTERFAZ  ===================================
+# =====================================================================
+
+st.title("🧠➡️📍 Recomendador Emocional")
+
+# Sidebar ubicación y filtros (SOLO MANUAL)
+st.sidebar.header("📍 Ubicación y filtros")
+
+addr_default = st.session_state.get("center_address", "")
+addr_input = st.sidebar.text_input("Dirección (calle y número, o lugar):", value=addr_default)
+if st.sidebar.button("📍 Usar esta dirección"):
+    try:
+        (lat, lon), fmt = geocode_address(addr_input)
+        st.session_state.center_latlon = (lat, lon)
+        st.session_state.center_address = fmt
+        st.sidebar.success(f"Dirección establecida: {fmt}")
+    except Exception as e:
+        st.sidebar.error(f"No se pudo geocodificar: {e}")
+
+radius = st.sidebar.slider("Radio de búsqueda (m)", min_value=200, max_value=5000, value=1500, step=100)
+open_now = st.sidebar.checkbox("Solo abiertos ahora", value=True)
+min_rating = st.sidebar.slider("Puntuación mínima", min_value=0.0, max_value=5.0, value=0.0, step=0.1)
+
+st.sidebar.caption(f"Dirección actual: {st.session_state.center_address}")
+st.sidebar.map(pd.DataFrame([{"lat": st.session_state.center_latlon[0], "lon": st.session_state.center_latlon[1]}]))
+
+# Paso 1: emociones → lugares
+st.subheader("1) Dime cómo te sientes")
+mood_text = st.text_area("Tu estado de ánimo:", placeholder="Ej.: Estoy estresado, me vendría bien desconectar...")
+
+def _remove_term(idx: int):
+    try:
+        del st.session_state.suggested_terms[idx]
+        st.rerun()
+    except Exception:
+        pass
+
+if st.button("🎯 Recomendar lugares"):
+    if mood_text.strip():
+        try:
+            empathy, places_raw, cat = gemini_brain(mood_text, avoid_terms=st.session_state.recent_terms)
+            # Normaliza a keywords Nearby
+            places = normalize_to_nearby_keywords(places_raw, cat or "neutro", avoid=st.session_state.recent_terms)
+            st.session_state.empathy_message = empathy
+            st.session_state.suggested_terms = places
+            # Actualiza recientes para evitar repetición en sesiones siguientes
+            st.session_state.recent_terms = list(dict.fromkeys((st.session_state.recent_terms + places)))[-24:]
+        except Exception as e:
+            st.session_state.empathy_message = _fallback_empathy(mood_text)
+            st.session_state.suggested_terms = mock_from_mood(mood_text, avoid=st.session_state.recent_terms)
+
+# Mostrar mensaje empático si existe
+if st.session_state.empathy_message:
+    st.info(st.session_state.empathy_message)
+
+# ---- Lista en casillas (grid) de 'Lugares sugeridos' con ✖ y añadir ----
+st.subheader("Lugares sugeridos")
+
+def render_term_cards(terms: list[str], cards_per_row: int = 4):
+    if not terms:
+        st.info("No hay sugerencias aún. Usa «Recomendar lugares» o añade alguna manualmente.")
+        return
+    st.caption("Pulsa ✖ para quitar un término.")
+    row_cols = None
+    for i, term in enumerate(list(terms)):
+        if i % cards_per_row == 0:
+            row_cols = st.columns(cards_per_row, gap="small")
+        col = row_cols[i % cards_per_row]
+        with col:
+            with st.container():
+                inner = st.columns([0.8, 0.2])
+                with inner[0]:
+                    st.markdown(f"**{term}**")
+                with inner[1]:
+                    st.button("✖", key=f"del_term_{i}", help=f"Descartar «{term}»", on_click=_remove_term, args=(i,))
+                st.markdown("<hr style='margin:6px 0; opacity:0.2;'>", unsafe_allow_html=True)
+
+render_term_cards(st.session_state.suggested_terms, cards_per_row=4)
+
+with st.form("add_term_form", clear_on_submit=True):
+    new_term = st.text_input("Añadir tipo de lugar (se normaliza para Google Maps)", placeholder="p. ej., mirador, cafetería tranquila, jardín botánico…")
+    add_clicked = st.form_submit_button("➕ Añadir")
+    if add_clicked:
+        nt = (new_term or "").strip()
+        if nt:
+            # Normaliza manual también a keyword Nearby
+            cat_hint = detect_mood_category(mood_text or "")
+            canon = _map_term_to_canon(nt, cat_hint)
+            if canon not in st.session_state.suggested_terms:
+                st.session_state.suggested_terms.append(canon)
+                st.success(f"Añadido: {canon}")
+                st.rerun()
+            else:
+                st.warning("Ese término ya está en la lista.")
+
+place_terms = st.session_state.suggested_terms
+
+# =====================================================================
+# ======================  BÚSQUEDA NEARBY  ============================
+# =====================================================================
+
+def compute_nearby_df(terms: list[str], center_latlon, radius, open_now, language="es") -> pd.DataFrame:
+    by_id = {}
+    any_results = False
+    for term in terms:
+        results = places_nearby_all(center_latlon, term, radius=radius, open_now=open_now, language=language)
+        if not results and open_now:
+            # Fallback por término: si "abierto ahora" no devuelve nada, prueba sin filtro
+            results = places_nearby_all(center_latlon, term, radius=radius, open_now=False, language=language)
+        if results:
+            any_results = True
+        for p in results:
+            locp = p.get("geometry", {}).get("location", {})
+            pid = p.get("place_id")
+            if not pid:
+                continue
+            photos = p.get("photos", []) or []
+            photo_ref = photos[0].get("photo_reference") if (photos and isinstance(photos[0], dict)) else None
+
+            if pid in by_id:
+                by_id[pid]["_sug_set"].add(term)
+                if p.get("rating", 0) and (p.get("rating", 0) > by_id[pid].get("rating", 0)):
+                    by_id[pid]["rating"] = p.get("rating")
+                if p.get("user_ratings_total", 0) and (p.get("user_ratings_total", 0) > by_id[pid].get("user_ratings_total", 0)):
+                    by_id[pid]["user_ratings_total"] = p.get("user_ratings_total")
+                if (not by_id[pid].get("photo_ref")) and photo_ref:
+                    by_id[pid]["photo_ref"] = photo_ref
+                continue
+
+            by_id[pid] = {
+                "✅": False,
+                "_sug_set": set([term]),
+                "sugerencia": term,
+                "name": p.get("name"),
+                "rating": p.get("rating"),
+                "user_ratings_total": p.get("user_ratings_total"),
+                "address": p.get("vicinity"),
+                "lat": locp.get("lat"),
+                "lon": locp.get("lng"),
+                "place_id": pid,
+                "maps_link": _maps_link(locp.get("lat"), locp.get("lng")),
+                "photo_ref": photo_ref,
+            }
+    rows = []
+    for rec in by_id.values():
+        rec["sugerencia"] = ", ".join(sorted(rec["_sug_set"]))
+        rec.pop("_sug_set", None)
+        rows.append(rec)
+
+    df = pd.DataFrame(rows)
+    df = compute_scores(df, center_latlon, radius, w_rating=W_RATING, w_reviews=W_REVIEWS, w_prox=W_PROX)
+    df = df.sort_values(by=["score"], ascending=[False]).reset_index(drop=True)
+    return df
+
+# Firma de búsqueda
+search_sig = (tuple(sorted(place_terms)), st.session_state.center_latlon, int(radius), bool(open_now))
+
+if place_terms:
+    if st.session_state.last_search_sig != search_sig:
+        new_df = compute_nearby_df(place_terms, st.session_state.center_latlon, radius, open_now, language="es")
+
+        if not st.session_state.raw_results_df.empty and "place_id" in st.session_state.raw_results_df.columns:
+            prev = st.session_state.raw_results_df[["place_id", "✅"]].drop_duplicates("place_id")
+            new_df = new_df.merge(prev, on="place_id", how="left", suffixes=("", "_old"))
+            if "✅_old" in new_df.columns:
+                # Trata cualquier valor exactamente True como seleccionado; NaN y otros -> False
+                new_df.loc[:, "✅"] = new_df["✅"].eq(True) | new_df["✅_old"].eq(True)
+                new_df.drop(columns=["✅_old"], inplace=True)
+
+        if "✅" in new_df.columns:
+            new_df["✅"] = new_df["✅"].astype(bool)
+            sort_cols = ["✅", "score"] if new_df["✅"].any() else ["score"]
+            new_df = new_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
+
+        st.session_state.raw_results_df = new_df
+        st.session_state.last_search_sig = search_sig
+        st.session_state.pending_resort = True
+else:
+    if not st.session_state.raw_results_df.empty:
+        st.session_state.raw_results_df = pd.DataFrame()
+        st.session_state.results_df = pd.DataFrame()
+        st.session_state.selected_df = pd.DataFrame()
+
+# =====================================================================
+# ======================  RESULTADOS CERCA  ============================
+# =====================================================================
+
+st.subheader("2) 🔎 Resultados cerca")
+
+new_intelligent_mode = st.checkbox(
+    "🧠 Modo inteligente (cálculo de desvíos y etiquetas de ruta)",
+    value=st.session_state.get("intelligent_mode", False),
+    help="Al activarlo, estimamos cómo encaja cada sitio en tu ruta (genial/muy bien/...). "
+         "Esto puede tardar más y consume cuota de la API."
+)
+if "prev_intelligent_mode" not in st.session_state:
+    st.session_state.prev_intelligent_mode = new_intelligent_mode
+
+if new_intelligent_mode != st.session_state.prev_intelligent_mode:
+    st.session_state.intelligent_mode = new_intelligent_mode
+    st.session_state.prev_intelligent_mode = new_intelligent_mode
+    st.session_state.editor_nonce += 1
+    st.session_state.pending_resort = True
+    st.rerun()
+
+st.session_state.intelligent_mode = new_intelligent_mode
+if st.session_state.intelligent_mode:
+    st.caption("Calculamos el impacto en tu ruta para priorizar lugares que te pillen de camino.")
+
+def _sync_results_back_to_raw():
+    if "results_df" in st.session_state and isinstance(st.session_state.results_df, pd.DataFrame) and not st.session_state.results_df.empty:
+        res = st.session_state.results_df[["place_id", "✅"]].dropna(subset=["place_id"]).drop_duplicates("place_id")
+        raw = st.session_state.raw_results_df
+        if not raw.empty:
+            raw = raw.merge(res, on="place_id", how="left", suffixes=("", "_new"))
+            if "✅_new" in raw.columns:
+                raw.loc[:, "✅"] = raw["✅_new"].combine_first(raw["✅"]).eq(True)
+                raw = raw.drop(columns=["✅_new"])
+            st.session_state.raw_results_df = raw
+
+if not st.session_state.raw_results_df.empty:
+    base = st.session_state.raw_results_df.copy()
+    base = compute_scores(base, st.session_state.center_latlon, radius, w_rating=W_RATING, w_reviews=W_REVIEWS, w_prox=W_PROX)
+
+    # Ruta base para etiquetas, si procede
+    selected_coords = []
+    if not base.empty and "✅" in base.columns:
+        sel_raw = base[base["✅"] == True]  # noqa
+        for _, r in sel_raw.iterrows():
+            if pd.notna(r.get("lat")) and pd.notna(r.get("lon")):
+                selected_coords.append((float(r["lat"]), float(r["lon"])))
+
+    if st.session_state.intelligent_mode and len(selected_coords) >= 1:
+        base = compute_multi_stop_detours(
+            origin_text=st.session_state.center_address,
+            selected_coords=selected_coords,
+            candidates_df=base,
+            mode=st.session_state.route_mode
+        )
+        if "ruta" not in base.columns:
+            base["ruta"] = ""
+        base["ruta"] = base["ruta"].fillna("").astype(str)
+    else:
+        base["detour_ratio"] = np.nan
+        base["ruta"] = ""
+
+    view_df = filter_by_rating_df(base, min_rating=min_rating)
+    if "✅" in view_df.columns:
+        view_df.loc[:, "✅"] = view_df["✅"].astype(bool)
+    sort_cols = ["✅", "score"] if (st.session_state.get("pending_resort", False) or (not view_df.empty and view_df["✅"].any())) else ["score"]
+    view_df = view_df.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
+    st.session_state.pending_resort = False
+
+    # ---------- Tabla ----------
+    def _toggle_check(place_id: str):
+        val = st.session_state.get(f"rowcheck_{place_id}", False)
+        raw = st.session_state.raw_results_df
+        mask = raw["place_id"] == place_id
+        if mask.any():
+            raw.loc[mask, "✅"] = bool(val)
+            st.session_state.raw_results_df = raw
+        st.session_state.selected_df = st.session_state.raw_results_df[st.session_state.raw_results_df["✅"] == True].copy()  # noqa
+
+    header_cols = ["✅", "Nombre", "Coincidió con", "Ruta" if st.session_state.intelligent_mode else None,
+                   "Score", "Distancia (m)", "Rating", "Reseñas"]
+    header_cols = [h for h in header_cols if h is not None]
+    col_widths = [0.7, 3.2, 2.8] + ([1.2] if st.session_state.intelligent_mode else []) + [1.0, 1.4, 1.1, 1.2]
+    col_widths = col_widths[:len(header_cols)]
+    hdr = st.columns(col_widths, gap="small")
+    for c, h in zip(hdr, header_cols):
+        c.markdown(f"**{h}**")
+
+    with st.container(height=LIST_CONTAINER_HEIGHT_PX, border=True, width="stretch"):
+        for _, row in view_df.iterrows():
+            place_id = str(row.get("place_id"))
+            name = row.get("name") or "Lugar"
+            sug = row.get("sugerencia", "")
+            ruta_tag = row.get("ruta", "") if st.session_state.intelligent_mode else None
+            score = row.get("score")
+            distm = row.get("distance_m")
+            rating = row.get("rating")
+            reviews_n = row.get("user_ratings_total")
+            fallback_photo_ref = row.get("photo_ref")
+            checked = bool(row.get("✅", False))
+
+            cols = st.columns(col_widths, gap="small")
+
+            with cols[0]:
+                st.checkbox(
+                    "Seleccionar",
+                    label_visibility="collapsed",
+                    key=f"rowcheck_{place_id}",
+                    value=checked,
+                    help="Seleccionar",
+                    on_change=_toggle_check,
+                    args=(place_id,)
+                )
+
+            with cols[1]:
+                with st.popover(name, width="stretch"):
+                    details = get_place_details(place_id)
+                    # Foto
+                    photo_shown = False
+                    try:
+                        photos = details.get("photos", []) or []
+                        pref = None
+                        if photos and isinstance(photos[0], dict):
+                            pref = photos[0].get("photo_reference")
+                        if not pref:
+                            pref = fallback_photo_ref
+                        if pref:
+                            st.image(place_photo_url(pref, maxwidth=640), width="stretch")
+                            photo_shown = True
+                    except Exception:
+                        pass
+                    if not photo_shown:
+                        st.caption("Sin foto principal disponible.")
+
+                    # Cabecera rating / reseñas
+                    r = details.get("rating", rating)
+                    ur = details.get("user_ratings_total", reviews_n)
+                    head_bits = []
+                    if r is not None and str(r) != "nan":
+                        head_bits.append(f"⭐ {r}")
+                    if ur is not None and str(ur) != "nan":
+                        head_bits.append(f"· {int(ur)} reseñas")
+                    if head_bits:
+                        st.markdown("**" + " ".join(head_bits) + "**")
+
+                    # Reseñas (normaliza v2/v3)
+                    reviews = details.get("reviews") or []
+                    parsed = []
+                    for rev in reviews[:3]:
+                        author = rev.get("author_name") or rev.get("authorAttribution", {}).get("displayName") or "Usuario"
+                        rr = rev.get("rating", "")
+                        when = rev.get("relative_time_description") or rev.get("publishTime", "")
+                        text = rev.get("text", "")
+                        if isinstance(text, dict):
+                            text = text.get("text", "")
+                        text = (text or "").strip()
+                        parsed.append((author, rr, when, text))
+                    if parsed:
+                        st.markdown("---")
+                        st.markdown("**Reseñas destacadas:**")
+                        for (auth, rr, when, txt) in parsed:
+                            st.markdown(f"**{auth}** — ⭐ {rr} · _{when}_  \n{txt if txt else '_(sin texto)_' }")
+                    else:
+                        st.caption("Sin reseñas públicas.")
+
+                    maps_url = details.get("url") or row.get("maps_link")
+                    if maps_url:
+                        st.markdown(f"[Ver en Google Maps ↗]({maps_url})")
+
+            with cols[2]:
+                st.write(sug if sug else "")
+
+            idx = 3
+            if st.session_state.intelligent_mode:
+                with cols[idx]:
+                    st.write(ruta_tag if ruta_tag else "")
+                idx += 1
+
+            with cols[idx]:
+                st.write(f"{(score or 0):.3f}")
+            idx += 1
+
+            with cols[idx]:
+                st.write(f"{(distm or 0):.0f}")
+            idx += 1
+
+            with cols[idx]:
+                st.write("" if (rating is None or str(rating) == "nan") else f"{float(rating):.1f}")
+            idx += 1
+
+            with cols[idx]:
+                st.write("" if (reviews_n is None or str(reviews_n) == "nan") else int(reviews_n))
+
+    st.session_state.results_df = view_df.copy()
+    _sync_results_back_to_raw()
+    st.session_state.selected_df = st.session_state.raw_results_df[st.session_state.raw_results_df["✅"] == True].copy()  # noqa
+else:
+    st.info("No hay resultados aún. Añade o recomiende términos arriba para empezar.")
+
+# =====================================================================
+# ======================  SELECCIONADOS  ===============================
+# =====================================================================
+
+st.subheader("3) ✅ Tus seleccionados")
+
+def _on_remove_selected(place_id: str):
+    if "raw_results_df" in st.session_state and isinstance(st.session_state.raw_results_df, pd.DataFrame) and not st.session_state.raw_results_df.empty:
+        mask_raw = st.session_state.raw_results_df["place_id"] == place_id
+        if mask_raw.any():
+            st.session_state.raw_results_df.loc[mask_raw, "✅"] = False
+    if "raw_results_df" in st.session_state and not st.session_state.raw_results_df.empty:
+        st.session_state.selected_df = st.session_state.raw_results_df[st.session_state.raw_results_df["✅"] == True].copy()  # noqa
+    else:
+        st.session_state.selected_df = pd.DataFrame()
+    st.session_state.editor_nonce += 1
+    st.rerun()
+
+def render_selected_cards(df: pd.DataFrame, cards_per_row: int = 2):
+    if df.empty:
+        st.info("Marca algunos lugares en la tabla del paso 2 para verlos aquí.")
+        return
+    st.caption("Pulsa ✖ para quitar un lugar de tus seleccionados (también se desmarcará en la tabla del paso 2).")
+    records = df.to_dict("records")
+    for i, row in enumerate(records):
+        if i % cards_per_row == 0:
+            row_cols = st.columns(cards_per_row, gap="small")
+        col = row_cols[i % cards_per_row]
+        with col:
+            with st.container():
+                name = row.get("name", "Lugar")
+                addr = row.get("address", "")
+                rating = row.get("rating", None)
+                score = row.get("score", None)
+                distm = row.get("distance_m", None)
+                place_id = str(row.get("place_id", f"idx_{i}"))
+
+                header_cols = st.columns([0.8, 0.2], gap="small")
+                with header_cols[0]:
+                    st.markdown(f"**{name}**")
+                    sub = addr
+                    if rating is not None and str(rating) != "nan":
+                        sub += f" · ⭐ {rating}"
+                    if score is not None and str(score) != "nan":
+                        sub += f" · Ⓢ {score:.3f}"
+                    if distm is not None and str(distm) != "nan":
+                        sub += f" · 📏 {distm:.0f} m"
+                    st.caption(sub)
+                with header_cols[1]:
+                    st.button(
+                        "✖",
+                        key=f"rm_sel_{place_id}",
+                        help="Quitar este lugar de tus seleccionados",
+                        on_click=_on_remove_selected,
+                        args=(place_id,)
+                    )
+                st.markdown("<hr style='margin:6px 0; opacity:0.2;'>", unsafe_allow_html=True)
+
+render_selected_cards(st.session_state.selected_df, cards_per_row=2)
+
+# =====================================================================
+# ======================  RUTA FINAL  =================================
+# =====================================================================
+
+if not st.session_state.selected_df.empty:
+    st.subheader("4) 🗺️ Ruta")
+    st.caption(
+        "Muestra la ruta usando Google Maps. Este bloque solo construye el enlace/iframe "
+        "y Google se encarga de dibujar el mapa. "
+        "Para priorizar lugares que 'pillen de camino' mientras eliges, usa el 🧠 Modo inteligente (arriba)."
+    )
+
+    st.session_state.route_mode = st.radio(
+        "Modo de ruta:",
+        ["driving", "walking", "bicycling", "transit"],
+        horizontal=True,
+        index=["driving","walking","bicycling","transit"].index(st.session_state.route_mode)
+    )
+
+    st.session_state.optimize_waypoints = st.checkbox(
+        "Optimizar el orden de paradas para una ruta más corta",
+        value=st.session_state.optimize_waypoints,
+        help="Usa la API de Directions para encontrar el orden óptimo de las paradas (origen = tu dirección actual; destino = la última selección)."
+    )
+
+    selected_rows = st.session_state.selected_df.to_dict("records")
+    selected_coords = [(float(r["lat"]), float(r["lon"])) for r in selected_rows if pd.notna(r.get("lat")) and pd.notna(r.get("lon"))]
+
+    ordered_waypoints = []
+    dest_latlon = None
+    total_secs = None
+
+    if st.session_state.optimize_waypoints:
+        order_idx, ordered_waypoints, dest_latlon, total_secs = optimize_route_order(
+            origin_text=st.session_state.center_address,
+            stops_latlon=selected_coords,
+            mode=st.session_state.route_mode
+        )
+        if dest_latlon is None and selected_coords:
+            dest_latlon = selected_coords[-1]
+    else:
+        if len(selected_coords) >= 1:
+            dest_latlon = selected_coords[-1]
+            ordered_waypoints = selected_coords[:-1]
+            total_secs = route_total_seconds(
+                origin_text=st.session_state.center_address,
+                waypoints=tuple(_latlon_str(w) for w in ordered_waypoints),
+                dest_latlon=dest_latlon,
+                mode=st.session_state.route_mode
+            )
+
+    if total_secs:
+        mins = int(round(total_secs / 60.0))
+        st.caption(f"Duración estimada total: ~{mins} min (según Google Directions).")
+
+    dest_row = selected_rows[-1] if selected_rows else None
+
+    if st.button("🗺️ Ver ruta en el mapa (iframe)"):
+        url = gm_embed_directions_url(
+            origin_text=st.session_state.center_address,
+            dest_place_id=dest_row.get("place_id") if dest_row else None,
+            dest_text=dest_row.get("address") if dest_row else None,
+            mode=st.session_state.route_mode,
+            waypoints_latlon=ordered_waypoints if ordered_waypoints else None
+        )
+        st.components.v1.iframe(url, height=480, scrolling=False)
+
+    maps_url = maps_directions_link(
+        origin_text=st.session_state.center_address,
+        dest_place_id=dest_row.get("place_id") if dest_row else None,
+        dest_text=dest_row.get("address") if dest_row else None,
+        mode=st.session_state.route_mode,
+        waypoints_latlon=ordered_waypoints if ordered_waypoints else None,
+        optimize_waypoints=st.session_state.optimize_waypoints
+    )
+    st.markdown(f"[Abrir en Google Maps ↗]({maps_url})")
