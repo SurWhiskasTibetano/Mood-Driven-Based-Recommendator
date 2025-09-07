@@ -51,12 +51,11 @@ Aplicación en Streamlit que, a partir de un texto sobre el estado emocional del
   - pandas
   - numpy
 
-Instalación:
+## Instalación:
 
-```bash
 pip install streamlit googlemaps requests python-dotenv pandas numpy
 
-Variables de entorno
+## Variables de entorno
 
 Crear un archivo .env en la raíz del proyecto con:
 
@@ -69,7 +68,7 @@ Notas:
 
     GEMINI_API_KEY es opcional. Si no está o la llamada falla, se usa un fallback curado para el mensaje y los tipos de lugar.
 
-Ejecución
+## Ejecución
 
 streamlit run app.py
 
@@ -89,7 +88,7 @@ Uso
 
     Genera el enlace o el iframe de Google Maps con las paradas seleccionadas, con opción de optimizar el orden.
 
-Arquitectura y ficheros
+## Arquitectura y ficheros
 
 .
 ├── app.py            # Interfaz Streamlit y flujo principal
@@ -100,7 +99,7 @@ Arquitectura y ficheros
 ├── routing.py        # Cálculo de rutas, optimización de waypoints e inserción de paradas
 └── taxonomy.py       # Taxonomía: sinónimos a canónico, listas curadas y heurísticas
 
-Tabla de responsabilidades por módulo:
+## Tabla de responsabilidades por módulo:
 Módulo    Responsabilidad
 app.py    UI, estado, orquestación del flujo y vistas
 brain.py    Categoría emocional, mensaje empático, sugerencias y normalización
@@ -127,8 +126,8 @@ Flujo de trabajo
 
     Modo inteligente: routing.compute_multi_stop_detours etiqueta cada candidato con su impacto en la ruta.
 
-Detalles técnicos
-Normalización y taxonomía
+## Detalles técnicos
+# Normalización y taxonomía
 
     taxonomy._map_term_to_canon(term, category_hint) convierte entradas libres a un vocabulario canónico compatible con Nearby mediante:
 
@@ -140,11 +139,11 @@ Normalización y taxonomía
 
         Fallback por emoción con CANON_BY_EMOTION.
 
-Recomendación de coherencia:
+# Recomendación de coherencia:
 
     Asegurar que todos los canónicos usados en sinónimos existan en CANON_KEYWORDS. Unificar nombres como minigolf frente a mini golf. Si se usa templo, incluirlo también en CANON_KEYWORDS.
 
-Búsqueda Nearby y consolidación
+# Búsqueda Nearby y consolidación
 
     ranking.places_nearby_all realiza la búsqueda por keyword dentro de un radio y maneja la paginación con next_page_token (incluye la espera mínima requerida por la API).
 
@@ -160,7 +159,7 @@ Búsqueda Nearby y consolidación
 
     maps_io.get_place_details enriquece con foto, reseñas y url de Google Maps.
 
-Scoring
+## Scoring
 
 Cálculo del score compuesto:
 
