@@ -145,9 +145,12 @@ Flujo de trabajo
 
 ### Búsqueda Nearby y consolidación
 
-    ranking.places_nearby_all realiza la búsqueda por keyword dentro de un radio y maneja la paginación con next_page_token (incluye la espera mínima requerida por la API).
+#### ranking.places_nearby_all 
+Realiza la búsqueda por keyword dentro de un radio y maneja la paginación con next_page_token (incluye la espera mínima requerida por la API).
 
-    Deduplicación por place_id; combinación de señales:
+#### Deduplicación por place_id 
+
+combinación de señales:
 
         rating máximo observado.
 
@@ -159,9 +162,9 @@ Flujo de trabajo
 
     maps_io.get_place_details enriquece con foto, reseñas y url de Google Maps.
 
-## Scoring
+### Scoring
 
-### Cálculo del score compuesto:
+Cálculo del score compuesto:
 
 rating_score   = rating / 5
 reviews_score  = log1p(nreseñas) / log1p(max_nreseñas_del_conjunto)
@@ -171,7 +174,7 @@ score = (W_RATING * rating_score
        + W_REVIEWS * reviews_score
        + W_PROX    * proximity_score) / (W_RATING + W_REVIEWS + W_PROX)
 
-Valores por defecto:
+### Valores por defecto:
 
     W_RATING = 0.5
 
