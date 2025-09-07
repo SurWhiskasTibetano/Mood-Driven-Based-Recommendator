@@ -129,14 +129,12 @@ Flujo de trabajo
 ## Detalles técnicos
 ### Normalización y taxonomía
 
-    - taxonomy._map_term_to_canon(term, category_hint) convierte entradas libres a un vocabulario canónico compatible con Nearby mediante:
-        - Coincidencias regex de sinónimos.
+- `taxonomy._map_term_to_canon(term, category_hint)` convierte entradas libres a un vocabulario canónico compatible con Nearby mediante:
+  - Coincidencias regex de sinónimos.
+  - Coincidencia directa con el vocabulario canónico.
+  - Heurística que elimina adjetivos comunes y reintenta.
+  - Fallback por emoción con `CANON_BY_EMOTION`.
 
-        -   Coincidencia directa con el vocabulario canónico.
-
-        - Heurística que elimina adjetivos comunes y reintenta.
-
-        - Fallback por emoción con CANON_BY_EMOTION.
 
 ### Recomendación de coherencia:
 
