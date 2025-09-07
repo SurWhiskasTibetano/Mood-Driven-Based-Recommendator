@@ -108,23 +108,17 @@ maps_io.py    Links/iframes de Maps, Place Details, URL de foto
 ranking.py    Nearby con paginación, cálculo de distancias y score compuesto
 routing.py    Duración de rutas, optimización, cálculo de desvíos y etiquetado
 taxonomy.py    Listas canónicas y mapeos de sinónimos a palabras clave Nearby
-Flujo de trabajo
+## Flujo de trabajo
 
-    Dirección manual: geocodifica a (lat, lon) y fija el centro de búsqueda.
+- Dirección manual: geocodifica a (lat, lon) y fija el centro de búsqueda.
+- Texto emocional: con GEMINI_API_KEY, brain.gemini_brain solicita un JSON con category, empathy, place_types.
+- Normalización: taxonomy._map_term_to_canon mapea los tipos a palabras clave canónicas aptas para Nearby.
+- Nearby: ranking.places_nearby_all busca por cada palabra clave, pagina resultados y deduplica por place_id.
+- Scoring: ranking.compute_scores calcula distance_m, normaliza rating y reseñas, y combina con proximidad en un score.
+- Resultados: tabla con selección, coincidencias, puntuación, distancia, rating, reseñas y popover de detalles.
+- Ruta: con seleccionados, routing.optimize_route_order o routing.route_total_seconds y construcción de enlace/iframe.
+- Modo inteligente: routing.compute_multi_stop_detours etiqueta cada candidato con su impacto en la ruta.
 
-    Texto emocional: con GEMINI_API_KEY, brain.gemini_brain solicita un JSON con category, empathy, place_types.
-
-    Normalización: taxonomy._map_term_to_canon mapea los tipos a palabras clave canónicas aptas para Nearby.
-
-    Nearby: ranking.places_nearby_all busca por cada palabra clave, pagina resultados y deduplica por place_id.
-
-    Scoring: ranking.compute_scores calcula distance_m, normaliza rating y reseñas, y combina con proximidad en un score.
-
-    Resultados: tabla con selección, coincidencias, puntuación, distancia, rating, reseñas y popover de detalles.
-
-    Ruta: con seleccionados, routing.optimize_route_order o routing.route_total_seconds y construcción de enlace/iframe.
-
-    Modo inteligente: routing.compute_multi_stop_detours etiqueta cada candidato con su impacto en la ruta.
 
 ## Detalles técnicos
 ### Normalización y taxonomía
@@ -136,9 +130,12 @@ Flujo de trabajo
   - Fallback por emoción con `CANON_BY_EMOTION`.
 
 
-### Recomendación de coherencia:
+### Recomendación de coherencia
 
-    Asegurar que todos los canónicos usados en sinónimos existan en CANON_KEYWORDS. Unificar nombres como minigolf frente a mini golf. Si se usa templo, incluirlo también en CANON_KEYWORDS.
+- Asegurar que todos los canónicos usados en sinónimos existan en `CANON_KEYWORDS`.
+- Unificar nombres como *minigolf* frente a *mini golf*.
+- Si se usa *templo*, incluirlo también en `CANON_KEYWORDS`.
+
 
 ### Búsqueda Nearby y consolidación
 
@@ -147,17 +144,14 @@ Realiza la búsqueda por keyword dentro de un radio y maneja la paginación con 
 
 #### Deduplicación por place_id 
 
-combinación de señales:
+Combinación de señales:
 
-        rating máximo observado.
+- Rating máximo observado.
+- `user_ratings_total` máximo observado.
+- `photo_ref` si no existía.
+- Conjunto de términos que coincidieron para mostrar “Coincidió con”.
 
-        user_ratings_total máximo observado.
-
-        photo_ref si no existía.
-
-        Conjunto de términos que coincidieron para mostrar “Coincidió con”.
-
-    maps_io.get_place_details enriquece con foto, reseñas y url de Google Maps.
+`maps_io.get_place_details` enriquece con foto, reseñas y URL de Google Maps.
 
 ### Scoring
 
@@ -171,13 +165,12 @@ score = (W_RATING * rating_score
        + W_REVIEWS * reviews_score
        + W_PROX    * proximity_score) / (W_RATING + W_REVIEWS + W_PROX)
 
-### Valores por defecto:
+### Valores por defecto
 
-    W_RATING = 0.5
+- `W_RATING = 0.5`
+- `W_REVIEWS = 0.3`
+- `W_PROX = 0.2`
 
-    W_REVIEWS = 0.3
-
-    W_PROX = 0.2
 
 ### Rutas y Modo inteligente
 
