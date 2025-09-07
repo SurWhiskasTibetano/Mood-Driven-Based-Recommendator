@@ -174,51 +174,38 @@ score = (W_RATING * rating_score
 
 ### Rutas y Modo inteligente
 
-    routing.optimize_route_order: utiliza Directions con optimize_waypoints=True para reordenar paradas y devuelve duración total.
+- `routing.optimize_route_order`: utiliza Directions con `optimize_waypoints=True` para reordenar paradas y devuelve duración total.
+- `routing.route_total_seconds`: suma de `legs[*].duration.value` en segundos.
+- `routing.compute_multi_stop_detours`:
+  - Calcula la ruta base (origen = dirección actual; destino = último seleccionado; waypoints = resto).
+  - Inserta virtualmente cada candidato, evalúa el mejor caso y calcula:  
+    `detour_ratio = (mejor_tiempo - tiempo_base) / tiempo_base`.
+  - `label_from_ratio` mapea a genial, muy bien, normal, mal o muy mal.
+  - Con muchas paradas, limita posiciones de inserción para contener consumo de cuota.
 
-    routing.route_total_seconds: suma de legs[*].duration.value en segundos.
-
-    routing.compute_multi_stop_detours:
-
-        Calcula la ruta base (origen = dirección actual; destino = último seleccionado; waypoints = resto).
-
-        Inserta virtualmente cada candidato, evalúa el mejor caso y calcula:
-        detour_ratio = (mejor_tiempo - tiempo_base) / tiempo_base.
-
-        label_from_ratio mapea a genial, muy bien, normal, mal o muy mal.
-
-        Con muchas paradas, limita posiciones de inserción para contener consumo de cuota.
 
 ### Cache y cuotas
 
-    Decoradores @st.cache_data en:
+- Decoradores `@st.cache_data` en:
+  - Place Details: TTL 600 s.
+  - Nearby: TTL 300 s.
+  - Duraciones y optimización: TTL 180 s.
+- El Modo inteligente incrementa las llamadas a Directions.  
+  Aplicarlo cuando haya al menos un lugar seleccionado y, si el volumen es grande, limitar el etiquetado a los *top N* por score.
 
-        Place Details: TTL 600 s.
-
-        Nearby: TTL 300 s.
-
-        Duraciones y optimización: TTL 180 s.
-
-    El Modo inteligente incrementa las llamadas a Directions. Aplicarlo cuando haya al menos un lugar seleccionado y, si el volumen es grande, limitar el etiquetado a los top N por score.
 
 ## Límites y buenas prácticas
 
-    Waypoints en Directions tienen límites según plan. Ajustar el número de paradas si te acercas al máximo.
+- Waypoints en Directions tienen límites según plan. Ajustar el número de paradas si te acercas al máximo.
+- Si `open_now` no devuelve resultados, la app reintenta sin ese filtro automáticamente.
+- Radios grandes favorecen la proximidad relativa; si se busca neutralidad entre radios, considerar funciones de decaimiento por distancia absoluta.
+- Para direcciones ambiguas, especificar ciudad y país.
 
-    Si open_now no devuelve resultados, la app reintenta sin ese filtro automáticamente.
-
-    Radios grandes favorecen la proximidad relativa; si se busca neutralidad entre radios, considerar funciones de decaimiento por distancia absoluta.
-
-    Para direcciones ambiguas, especificar ciudad y país.
 
 ## Solución de problemas
 
-    Falta GOOGLE_MAPS_API_KEY: la app se detiene con un mensaje en config.py. Añade la clave al .env.
-
-    Llamadas a Gemini fallan o no hay clave: se usa el fallback de taxonomía y mensaje empático.
-
-    Tabla vacía: añade términos de lugar o amplía el radio de búsqueda.
-
-    Etiquetas de ruta vacías: activa el Modo inteligente y asegúrate de tener al menos un lugar seleccionado.
-
-    Exceso de paradas: reduce el número de waypoints o desactiva la optimización.
+- **Falta `GOOGLE_MAPS_API_KEY`**: la app se detiene con un mensaje en `config.py`. Añade la clave al `.env`.
+- **Llamadas a Gemini fallan o no hay clave**: se usa el fallback de taxonomía y mensaje empático.
+- **Tabla vacía**: añade términos de lugar o amplía el radio de búsqueda.
+- **Etiquetas de ruta vacías**: activa el Modo inteligente y asegúrate de tener al menos un lugar seleccionado.
+- **Exceso de paradas**: reduce el número de waypoints o desactiva la optimización.
