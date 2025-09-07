@@ -1,25 +1,16 @@
-# pruebas.py — Recomendador Emocional con dirección (calle y número), Nearby y rutas Google Maps
-# Modo: SOLO ubicación manual
-# Requisitos: streamlit, googlemaps, requests, python-dotenv, pandas, numpy
+# Create the 7-file refactor as actual files the user can download.
+import os, textwrap, json
 
+base = "/mnt/data/emo_reco"
+os.makedirs(base, exist_ok=True)
+
+files = {}
+
+files["config.py"] = r'''
 import os
-import time
-import json
-import math
-import re
-import unicodedata
-import random
-import requests
-import numpy as np
-import pandas as pd
 import googlemaps
 import streamlit as st
 from dotenv import load_dotenv
-from urllib.parse import quote_plus
-from datetime import datetime
-
-# --------- Config de página (primera llamada a st.*) ---------
-st.set_page_config(page_title="Recomendador Emocional", layout="wide")
 
 # --------- Claves desde .env ---------
 load_dotenv()
@@ -30,6 +21,7 @@ if not GOOGLE_MAPS_API_KEY:
     st.error("Falta GOOGLE_MAPS_API_KEY en .env")
     st.stop()
 
+# Cliente Google Maps
 gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
 
 # --------- Constantes de UI ---------
@@ -39,10 +31,12 @@ LIST_CONTAINER_HEIGHT_PX = 720  # altura del contenedor scrollable
 W_RATING = 0.5
 W_REVIEWS = 0.3
 W_PROX = 0.2
+'''.strip()
 
-# =====================================================================
-# ======================  CEREBRO PRINCIPAL (IA)  =====================
-# =====================================================================
+files["taxonomy.py"] = r'''
+import re
+import random
+import unicodedata
 
 def _norm(t: str) -> str:
     t = (t or "").lower()
@@ -119,7 +113,6 @@ CURATED_BY_CATEGORY = {
 }
 
 # Palabras clave viables para Google Nearby (canon)
-# y sinónimos → canon
 CANON_KEYWORDS = [
     # Naturaleza / paseo
     "parque", "jardín botánico", "mirador", "paseo fluvial", "paseo marítimo", "reserva natural",
@@ -205,26 +198,6 @@ SYNONYMS_TO_CANON = {
     r"\bcaf[eé] con encanto\b": "café con encanto",
 }
 
-def _map_term_to_canon(term: str, category_hint: str = "neutro") -> str:
-    """Mapea un término a una keyword canónica Nearby-friendly."""
-    t = _norm(term)
-    # 1) Sinónimos por regex
-    for pat, canon in SYNONYMS_TO_CANON.items():
-        if re.search(pat, t):
-            return canon
-    # 2) Coincidencia directa con canon
-    for canon in CANON_KEYWORDS:
-        if _norm(canon) in t or t in _norm(canon):
-            return canon
-    # 3) Heurística: recorta adjetivos comunes
-    t_simple = re.sub(r"\b(tranquil[ao]s?|acogedor[ao]s?|rom[aá]ntic[ao]s?|peque[ñn]o[s]?)\b", "", t).strip()
-    for canon in CANON_KEYWORDS:
-        if _norm(canon) == t_simple:
-            return canon
-    # 4) Fallback: elige uno coherente con la emoción
-    pool = CANON_BY_EMOTION.get(category_hint, CANON_BY_EMOTION["neutro"])
-    return random.choice(pool)
-
 # Canon por emoción para completar variedad
 CANON_BY_EMOTION = {
     "tristeza": [
@@ -272,6 +245,40 @@ CANON_BY_EMOTION = {
         "centro cultural", "paseo fluvial"
     ],
 }
+
+def _map_term_to_canon(term: str, category_hint: str = "neutro") -> str:
+    """Mapea un término a una keyword canónica Nearby-friendly."""
+    t = _norm(term)
+    # 1) Sinónimos por regex
+    for pat, canon in SYNONYMS_TO_CANON.items():
+        if re.search(pat, t):
+            return canon
+    # 2) Coincidencia directa con canon
+    for canon in CANON_KEYWORDS:
+        if _norm(canon) in t or t in _norm(canon):
+            return canon
+    # 3) Heurística
+    t_simple = re.sub(r"\b(tranquil[ao]s?|acogedor[ao]s?|rom[aá]ntic[ao]s?|peque[ñn]o[s]?)\b", "", t).strip()
+    for canon in CANON_KEYWORDS:
+        if _norm(canon) == t_simple:
+            return canon
+    # 4) Fallback por emoción
+    pool = CANON_BY_EMOTION.get(category_hint, CANON_BY_EMOTION["neutro"])
+    return random.choice(pool)
+'''.strip()
+
+files["brain.py"] = r'''
+import re
+import json
+import random
+import requests
+from config import GEMINI_API_KEY
+from taxonomy import (
+    CURATED_BY_CATEGORY,
+    CANON_BY_EMOTION,
+    _map_term_to_canon,
+    _norm,
+)
 
 def detect_mood_category(mood_text: str) -> str:
     """Heurística robusta (fallback) con regex y límites de palabra."""
@@ -328,16 +335,12 @@ def _fallback_empathy(mood_text: str) -> str:
     }
     return templates.get(category, templates["neutro"])
 
-# Prompt único (Gemini devuelve JSON)
-PROMPT_BRAIN_JSON = """
-Eres un asistente en español (España). Analiza el estado del usuario y devuelve SOLO un JSON con esta forma:
-
+PROMPT_BRAIN_JSON = """ Eres un asistente en español (España). Analiza el estado del usuario y devuelve SOLO un JSON con esta forma: 
 {
   "category": "tristeza|ansiedad/estrés|ira|cansancio|soledad|aburrimiento|felicidad|amor/romance|curiosidad|calma/paz",
   "empathy": "1-2 frases, tono acorde a la emoción, EXACTAMENTE 1 emoji, NO empieces con 'Gracias por compartir'",
   "place_types": ["3 a 6 tipos de lugares en España, minúsculas, 1-3 palabras, sin nombres propios"]
 }
-
 Criterios:
 - Varía los tipos de lugares; evita repetir siempre los mismos.
 - Ajusta interior/exterior y social/individual según la emoción.
@@ -354,7 +357,7 @@ Estado del usuario: «{mood}»
 Evita (si hay): {avoid}
 """.strip()
 
-def gemini_brain(mood_text: str, avoid_terms: list[str] | None = None) -> tuple[str, list[str], str]:
+def gemini_brain(mood_text: str, avoid_terms: list[str] | None = None):
     """Devuelve (empathy_message, place_types, category) usando Gemini (JSON estricto)."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
@@ -367,7 +370,7 @@ def gemini_brain(mood_text: str, avoid_terms: list[str] | None = None) -> tuple[
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.9,  # variedad
+            "temperature": 0.9,
             "topP": 0.95,
             "maxOutputTokens": 350,
             "responseMimeType": "application/json"
@@ -404,7 +407,6 @@ def normalize_to_nearby_keywords(recommended: list[str], category: str, avoid: l
             out.append(canon)
         if len(out) >= 6:
             break
-    # Completa si faltan con canon por emoción sin repetir
     if len(out) < 3:
         pool = [x for x in CANON_BY_EMOTION.get(category or "neutro", CANON_BY_EMOTION["neutro"]) if x not in out and x not in avoid_set]
         random.shuffle(pool)
@@ -423,10 +425,12 @@ def mock_from_mood(mood_text: str, avoid: list[str] | None = None):
             break
         raw.append(c)
     return normalize_to_nearby_keywords(raw, category, avoid)
+'''.strip()
 
-# =====================================================================
-# ======================  UTILIDADES DE MAPS  ==========================
-# =====================================================================
+files["maps_io.py"] = r'''
+import streamlit as st
+from urllib.parse import quote_plus
+from config import gmaps, GOOGLE_MAPS_API_KEY
 
 def _maps_link(lat, lon):
     return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
@@ -487,7 +491,6 @@ def gm_embed_place_url(place_id=None, latlon=None):
         return f"{base}?key={GOOGLE_MAPS_API_KEY}&q={latlon[0]:.6f},{latlon[1]:.6f}"
     raise ValueError("Debes pasar place_id o latlon.")
 
-# --------- Detalles y fotos de Places ---------
 @st.cache_data(ttl=600, show_spinner=False)
 def get_place_details(place_id: str, language: str = "es") -> dict:
     try:
@@ -515,10 +518,15 @@ def get_place_details(place_id: str, language: str = "es") -> dict:
 def place_photo_url(photo_reference: str, maxwidth: int = 640) -> str:
     base = "https://maps.googleapis.com/maps/api/place/photo"
     return f"{base}?maxwidth={maxwidth}&photoreference={quote_plus(photo_reference)}&key={GOOGLE_MAPS_API_KEY}"
+'''.strip()
 
-# =====================================================================
-# ======================  GEOCODING / SCORE / NEARBY  =================
-# =====================================================================
+files["ranking.py"] = r'''
+import math
+import time
+import numpy as np
+import pandas as pd
+import streamlit as st
+from config import gmaps, W_RATING, W_REVIEWS, W_PROX
 
 def geocode_address(address: str, language: str = "es", region: str = "es"):
     res = gmaps.geocode(address, language=language, region=region)
@@ -595,16 +603,20 @@ def filter_by_rating_df(df: pd.DataFrame, min_rating=0.0) -> pd.DataFrame:
         df["rating"] = None
     df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
     return df[df["rating"] >= float(min_rating)]
+'''.strip()
 
-# =====================================================================
-# ======================  RUTAS Y DESVÍOS  ============================
-# =====================================================================
+files["routing.py"] = r'''
+import numpy as np
+import pandas as pd
+import streamlit as st
+from datetime import datetime
+from config import gmaps
 
 def _latlon_str(latlon):
     return f"{latlon[0]},{latlon[1]}"
 
 @st.cache_data(ttl=180, show_spinner=False)
-def route_total_seconds(origin_text: str, waypoints: tuple, dest_latlon: tuple, mode: str) -> float | None:
+def route_total_seconds(origin_text: str, waypoints: tuple, dest_latlon: tuple, mode: str):
     try:
         r = gmaps.directions(
             origin_text,
@@ -660,7 +672,7 @@ def label_from_ratio(ratio: float | None) -> str:
     if ratio <= 1.00:   return "mal"
     return "muy mal"
 
-def compute_multi_stop_detours(origin_text: str, selected_coords: list[tuple[float,float]], candidates_df: pd.DataFrame, mode: str) -> pd.DataFrame:
+def compute_multi_stop_detours(origin_text: str, selected_coords: list[tuple[float,float]], candidates_df, mode: str):
     if candidates_df.empty or len(selected_coords) == 0:
         candidates_df["detour_ratio"] = np.nan
         candidates_df["ruta"] = ""
@@ -707,6 +719,54 @@ def compute_multi_stop_detours(origin_text: str, selected_coords: list[tuple[flo
     candidates_df["detour_ratio"] = ratios
     candidates_df["ruta"] = candidates_df["detour_ratio"].apply(label_from_ratio)
     return candidates_df
+'''.strip()
+
+# app.py: keep all UI logic, calling into modules
+files["app.py"] = r'''
+# pruebas.py — Recomendador Emocional con dirección (calle y número), Nearby y rutas Google Maps
+# Modo: SOLO ubicación manual
+# Requisitos: streamlit, googlemaps, requests, python-dotenv, pandas, numpy
+
+import os
+import time
+import json
+import math
+import re
+import unicodedata
+import random
+import requests
+import numpy as np
+import pandas as pd
+import googlemaps
+import streamlit as st
+from dotenv import load_dotenv
+from urllib.parse import quote_plus
+from datetime import datetime
+
+# --------- Config de página (primera llamada a st.*) ---------
+st.set_page_config(page_title="Recomendador Emocional", layout="wide")
+
+# ==== imports desde módulos refactorizados ====
+from config import (
+    gmaps, GEMINI_API_KEY, GOOGLE_MAPS_API_KEY,
+    LIST_CONTAINER_HEIGHT_PX, W_RATING, W_REVIEWS, W_PROX
+)
+from taxonomy import _map_term_to_canon
+from brain import (
+    detect_mood_category, TONE_HINTS, _fallback_empathy,
+    PROMPT_BRAIN_JSON, gemini_brain, normalize_to_nearby_keywords, mock_from_mood
+)
+from maps_io import (
+    _maps_link, gm_embed_directions_url, maps_directions_link,
+    gm_embed_place_url, get_place_details, place_photo_url
+)
+from ranking import (
+    geocode_address, reverse_geocode, haversine_m, compute_scores,
+    places_nearby_all, filter_by_rating_df
+)
+from routing import (
+    route_total_seconds, optimize_route_order, label_from_ratio, compute_multi_stop_detours
+)
 
 # =====================================================================
 # ======================  ESTADO INICIAL  =============================
@@ -789,7 +849,7 @@ if st.button("🎯 Recomendar lugares"):
             places = normalize_to_nearby_keywords(places_raw, cat or "neutro", avoid=st.session_state.recent_terms)
             st.session_state.empathy_message = empathy
             st.session_state.suggested_terms = places
-            # Actualiza recientes para evitar repetición en sesiones siguientes
+            # Actualiza recientes
             st.session_state.recent_terms = list(dict.fromkeys((st.session_state.recent_terms + places)))[-24:]
         except Exception as e:
             st.session_state.empathy_message = _fallback_empathy(mood_text)
@@ -846,6 +906,7 @@ place_terms = st.session_state.suggested_terms
 # =====================================================================
 
 def compute_nearby_df(terms: list[str], center_latlon, radius, open_now, language="es") -> pd.DataFrame:
+    from maps_io import _maps_link  # asegurar import local
     by_id = {}
     any_results = False
     for term in terms:
@@ -936,8 +997,7 @@ st.subheader("2) 🔎 Resultados cerca")
 new_intelligent_mode = st.checkbox(
     "🧠 Modo inteligente (cálculo de desvíos y etiquetas de ruta)",
     value=st.session_state.get("intelligent_mode", False),
-    help="Al activarlo, estimamos cómo encaja cada sitio en tu ruta (genial/muy bien/...). "
-         "Esto puede tardar más y consume cuota de la API."
+    help="Al activarlo, estimamos cómo encaja cada sitio en tu ruta (genial/muy bien/...). Esto puede tardar más y consume cuota de la API."
 )
 if "prev_intelligent_mode" not in st.session_state:
     st.session_state.prev_intelligent_mode = new_intelligent_mode
@@ -1073,7 +1133,7 @@ if not st.session_state.raw_results_df.empty:
                     if head_bits:
                         st.markdown("**" + " ".join(head_bits) + "**")
 
-                    # Reseñas (normaliza v2/v3)
+                    # Reseñas
                     reviews = details.get("reviews") or []
                     parsed = []
                     for rev in reviews[:3]:
@@ -1233,7 +1293,7 @@ if not st.session_state.selected_df.empty:
             ordered_waypoints = selected_coords[:-1]
             total_secs = route_total_seconds(
                 origin_text=st.session_state.center_address,
-                waypoints=tuple(_latlon_str(w) for w in ordered_waypoints),
+                waypoints=tuple(f"{w[0]},{w[1]}" for w in ordered_waypoints),
                 dest_latlon=dest_latlon,
                 mode=st.session_state.route_mode
             )
@@ -1263,3 +1323,11 @@ if not st.session_state.selected_df.empty:
         optimize_waypoints=st.session_state.optimize_waypoints
     )
     st.markdown(f"[Abrir en Google Maps ↗]({maps_url})")
+'''.strip()
+
+# Write files
+for name, content in files.items():
+    with open(os.path.join(base, name), "w", encoding="utf-8") as f:
+        f.write(content)
+
+sorted(os.listdir(base))
