@@ -21,7 +21,6 @@ Aplicación en Streamlit que, a partir de un texto sobre el estado emocional del
   - [Cache y cuotas](#cache-y-cuotas)
 - [Límites y buenas prácticas](#límites-y-buenas-prácticas)
 - [Solución de problemas](#solución-de-problemas)
-- [Licencia](#licencia)
 
 ---
 
