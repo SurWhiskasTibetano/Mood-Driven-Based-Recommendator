@@ -90,14 +90,14 @@ Uso
 
 ## Arquitectura y ficheros
 
-.
-├── app.py            # Interfaz Streamlit y flujo principal
-├── brain.py          # Detección emocional, prompt a Gemini y normalización de sugerencias
-├── config.py         # Carga .env, cliente Google Maps, constantes de UI y pesos del scoring
-├── maps_io.py        # Utilidades de URLs (embed/link) y Place Details/Photo
-├── ranking.py        # Geocoding/Reverse, Nearby con paginación, scoring y filtros
-├── routing.py        # Cálculo de rutas, optimización de waypoints e inserción de paradas
-└── taxonomy.py       # Taxonomía: sinónimos a canónico, listas curadas y heurísticas
+- Ficheros:
+    - app.py            # Interfaz Streamlit y flujo principal
+    - brain.py          # Detección emocional, prompt a Gemini y normalización de sugerencias
+    - config.py         # Carga .env, cliente Google Maps, constantes de UI y pesos del scoring
+    - maps_io.py        # Utilidades de URLs (embed/link) y Place Details/Photo
+    - ranking.py        # Geocoding/Reverse, Nearby con paginación, scoring y filtros
+    - routing.py        # Cálculo de rutas, optimización de waypoints e inserción de paradas
+    - taxonomy.py       # Taxonomía: sinónimos a canónico, listas curadas y heurísticas
 
 ## Tabla de responsabilidades por módulo:
 Módulo    Responsabilidad
@@ -127,7 +127,7 @@ Flujo de trabajo
     Modo inteligente: routing.compute_multi_stop_detours etiqueta cada candidato con su impacto en la ruta.
 
 ## Detalles técnicos
-# Normalización y taxonomía
+### Normalización y taxonomía
 
     taxonomy._map_term_to_canon(term, category_hint) convierte entradas libres a un vocabulario canónico compatible con Nearby mediante:
 
@@ -139,11 +139,11 @@ Flujo de trabajo
 
         Fallback por emoción con CANON_BY_EMOTION.
 
-# Recomendación de coherencia:
+### Recomendación de coherencia:
 
     Asegurar que todos los canónicos usados en sinónimos existan en CANON_KEYWORDS. Unificar nombres como minigolf frente a mini golf. Si se usa templo, incluirlo también en CANON_KEYWORDS.
 
-# Búsqueda Nearby y consolidación
+### Búsqueda Nearby y consolidación
 
     ranking.places_nearby_all realiza la búsqueda por keyword dentro de un radio y maneja la paginación con next_page_token (incluye la espera mínima requerida por la API).
 
@@ -161,7 +161,7 @@ Flujo de trabajo
 
 ## Scoring
 
-Cálculo del score compuesto:
+### Cálculo del score compuesto:
 
 rating_score   = rating / 5
 reviews_score  = log1p(nreseñas) / log1p(max_nreseñas_del_conjunto)
@@ -179,7 +179,7 @@ Valores por defecto:
 
     W_PROX = 0.2
 
-Rutas y Modo inteligente
+### Rutas y Modo inteligente
 
     routing.optimize_route_order: utiliza Directions con optimize_waypoints=True para reordenar paradas y devuelve duración total.
 
@@ -196,7 +196,7 @@ Rutas y Modo inteligente
 
         Con muchas paradas, limita posiciones de inserción para contener consumo de cuota.
 
-Cache y cuotas
+### Cache y cuotas
 
     Decoradores @st.cache_data en:
 
@@ -208,7 +208,7 @@ Cache y cuotas
 
     El Modo inteligente incrementa las llamadas a Directions. Aplicarlo cuando haya al menos un lugar seleccionado y, si el volumen es grande, limitar el etiquetado a los top N por score.
 
-Límites y buenas prácticas
+## Límites y buenas prácticas
 
     Waypoints en Directions tienen límites según plan. Ajustar el número de paradas si te acercas al máximo.
 
@@ -218,7 +218,7 @@ Límites y buenas prácticas
 
     Para direcciones ambiguas, especificar ciudad y país.
 
-Solución de problemas
+## Solución de problemas
 
     Falta GOOGLE_MAPS_API_KEY: la app se detiene con un mensaje en config.py. Añade la clave al .env.
 
