@@ -2,6 +2,10 @@
 
 Aplicación en Streamlit que, a partir de un texto sobre el estado emocional del usuario, propone tipos de lugares, los normaliza a palabras clave compatibles con Google Maps Nearby, busca sitios cercanos a una dirección manual, permite seleccionar favoritos y genera una ruta en Google Maps (enlace e iframe). Incluye un Modo inteligente que estima el desvío de ruta al añadir cada candidato y lo etiqueta como genial, muy bien, normal, mal o muy mal.
 
+## Probar la aplicacion
+
+https://surwhiskastibetano-mood-driven-based-recommendator-app-ozhylp.streamlit.app/
+
 ---
 
 ## Índice
